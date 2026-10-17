@@ -21,10 +21,12 @@
 <p id="stats"></p>
 <div id="card">—</div>
 <p id="meaning">&nbsp;</p>
+<p id="ai" style="max-width:340px;margin:8px auto;color:#555"></p>
 <div>
   <button id="reveal" onclick="reveal()">顯示答案</button>
   <button id="ok" onclick="mark(true)" hidden>記得 ✓</button>
   <button id="no" onclick="mark(false)" class="warn" hidden>忘了 ✗</button>
+  <button id="aiBtn" onclick="aiExample()" hidden>AI 例句</button>
 </div>
 <script>
 // 單字包：之後 Sprint 4 會搬到 words.js，進 Git、全隊共享
@@ -52,6 +54,8 @@ function next(){
     $("card").textContent = "今日完成！";
     $("meaning").innerHTML = "&nbsp;";
     $("reveal").hidden = $("ok").hidden = $("no").hidden = true;
+    $("aiBtn").hidden = true;
+    $("ai").textContent = "";
     stats();
     return;
   }
@@ -60,6 +64,8 @@ function next(){
   $("meaning").innerHTML = "&nbsp;";
   $("reveal").hidden = false;
   $("ok").hidden = $("no").hidden = true;
+  $("aiBtn").hidden = true;
+  $("ai").textContent = "";
   stats();
 }
 
@@ -67,6 +73,7 @@ function reveal(){
   $("meaning").textContent = cur.zh;
   $("reveal").hidden = true;
   $("ok").hidden = $("no").hidden = false;
+  $("aiBtn").hidden = false;
 }
 
 function mark(ok){
@@ -76,6 +83,76 @@ function mark(ok){
   if (ok) queue.shift();
   else queue.push(queue.shift());   // 忘了的排到今天隊尾，等一下再考一次
   next();
+}
+
+// ===== Sprint 2：AI 例句 =====
+const MODEL = "claude-sonnet-5-5";   // 最新名稱見附錄 B
+const API_VERSION = "2023-06-01";    // anthropic-version 標頭值，見附錄 B
+
+// 使用者自帶金鑰：只存在這個瀏覽器的 localStorage，絕不寫進程式碼
+function getKey(){
+  let k = null;
+  try { k = localStorage.getItem("vb-key"); } catch(e){}
+  if (!k){
+    k = (prompt("貼上你的 API key（只存在你自己的瀏覽器）") || "").trim();
+    if (!k) return null;        // 按「取消」回的是 null，別把字串 "null" 存進去
+    try { localStorage.setItem("vb-key", k); } catch(e){}
+  }
+  return k;
+}
+
+async function aiExample(){
+  const word = cur.en, box = $("ai");
+  // 使用者可能在等待時已經翻到別張卡，過期的結果不要畫到新卡上
+  const stale = () => cur.en !== word || $("aiBtn").hidden;
+  let cache = {};
+  try { cache = JSON.parse(localStorage.getItem("vb-ai")) || {}; } catch(e){}
+  if (cache[word]) return show(cache[word]);        // 快取命中：不花錢、離線可用
+  const key = getKey();
+  if (!key){ box.textContent = "需要 API key 才能生成例句。"; return; }
+  box.textContent = "生成中…";
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": API_VERSION,
+        "anthropic-dangerous-direct-browser-access": "true"  // 瀏覽器直呼必加，見附錄 B
+      },
+      body: JSON.stringify({
+        model: MODEL, max_tokens: 1024,        // 額度含 thinking，見 2.5
+        // 注意：不要加 temperature——新模型會回 400，而且錯誤會被下面的 catch 吞掉
+        system: '你是高中英語老師。只輸出 JSON，不要 markdown 圍欄：{"sentence":"...","zh":"...","tip":"..."}',
+        messages: [{ role: "user",
+                     content: "用單字 " + word + " 造一個 CEFR B1 例句、中譯與聯想" }]
+      })
+    });
+    if (res.status === 401){                       // key 不對：清掉，下次自動重問
+      try { localStorage.removeItem("vb-key"); } catch(e){}
+      throw new Error("API key 不正確，已清除");
+    }
+    const data = await res.json();
+    const text = data.content.filter(b => b.type === "text")   // 依 type 挑，理由見 2.5
+                             .map(b => b.text).join("");
+    const c = JSON.parse(text);
+    if (!c.sentence.toLowerCase().includes(word.toLowerCase()))
+      throw new Error("例句沒包含目標單字");
+    cache[word] = c;
+    try { localStorage.setItem("vb-ai", JSON.stringify(cache)); } catch(e){}
+    show(c);
+  } catch (e) {
+    console.error("AI 例句失敗：", e);             // 讓錯誤現形：F12 → Console 看得到
+    if (!stale()) box.textContent = "AI 暫時不可用——不影響複習，例句之後再補。";
+  }
+  function show(c){
+    if (stale()) return;
+    box.textContent = "";                        // 模型輸出一律當「文字」，不當 HTML
+    const em = document.createElement("em");
+    em.textContent = c.sentence;
+    box.append(em, document.createElement("br"),
+               c.zh, document.createElement("br"), "聯想：" + c.tip);
+  }
 }
 
 function stats(){
