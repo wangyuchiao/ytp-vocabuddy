@@ -14,6 +14,9 @@
   button{margin:8px 6px 0;padding:10px 22px;font-size:1rem;border:none;border-radius:8px;
          background:#0f766e;color:#fff;cursor:pointer}
   button.warn{background:#b3403a}
+  #quiz{max-width:340px;margin:12px auto;color:#333}
+  #quiz button{display:block;width:100%;margin:8px 0 0}
+  #quiz button:disabled{opacity:.5;cursor:default}
 </style>
 </head>
 <body>
@@ -28,17 +31,14 @@
   <button id="no" onclick="mark(false)" class="warn" hidden>忘了 ✗</button>
   <button id="aiBtn" onclick="aiExample()" hidden>AI 例句</button>
 </div>
+<div style="margin-top:20px">
+  <button onclick="smartQuiz()">考我弱點</button>
+</div>
+<div id="quiz"></div>
+<script src="words.js"></script>
 <script src="srs.js"></script>
 <script>
-// 單字包：之後 Sprint 4 會搬到 words.js，進 Git、全隊共享
-const WORDS = [
-  {en:"algorithm", zh:"演算法"},   {en:"recursion", zh:"遞迴"},
-  {en:"vocabulary", zh:"字彙"},    {en:"memorize", zh:"背誦"},
-  {en:"efficient", zh:"有效率的"}, {en:"persist", zh:"堅持；持續"},
-  {en:"retrieve", zh:"取回；檢索"},{en:"interval", zh:"間隔"},
-  {en:"iterate", zh:"迭代；重複"},  {en:"complexity", zh:"複雜度"},
-  {en:"optimize", zh:"最佳化"}
-];
+// 單字包已搬到 words.js（進 Git、全隊共編）
 
 // 學習紀錄：只屬於這台裝置，所以放 localStorage（讀寫都包 try/catch）
 let log = {};
@@ -121,6 +121,33 @@ function getKey(){
   return k;
 }
 
+// 共用的 API 呼叫：給 system 與 user 兩段提示，回傳模型的文字
+async function callClaude(system, user){
+  const key = getKey();
+  if (!key){ const e = new Error("沒有 API key"); e.code = "NO_KEY"; throw e; }
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": API_VERSION,
+      "anthropic-dangerous-direct-browser-access": "true"  // 瀏覽器直呼必加，見附錄 B
+    },
+    body: JSON.stringify({
+      model: MODEL, max_tokens: 1024,      // 額度含 thinking，見 2.5；不要加 temperature，新模型會回 400
+      system: system,
+      messages: [{ role: "user", content: user }]
+    })
+  });
+  if (res.status === 401){                 // key 不對：清掉，下次自動重問
+    try { localStorage.removeItem("vb-key"); } catch(e){}
+    throw new Error("API key 不正確，已清除");
+  }
+  const data = await res.json();
+  return data.content.filter(b => b.type === "text")   // 依 type 挑，理由見 2.5
+                     .map(b => b.text).join("");
+}
+
 async function aiExample(){
   const word = cur.en, box = $("ai");
   // 使用者可能在等待時已經翻到別張卡，過期的結果不要畫到新卡上
@@ -128,33 +155,11 @@ async function aiExample(){
   let cache = {};
   try { cache = JSON.parse(localStorage.getItem("vb-ai")) || {}; } catch(e){}
   if (cache[word]) return show(cache[word]);        // 快取命中：不花錢、離線可用
-  const key = getKey();
-  if (!key){ box.textContent = "需要 API key 才能生成例句。"; return; }
   box.textContent = "生成中…";
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": key,
-        "anthropic-version": API_VERSION,
-        "anthropic-dangerous-direct-browser-access": "true"  // 瀏覽器直呼必加，見附錄 B
-      },
-      body: JSON.stringify({
-        model: MODEL, max_tokens: 1024,        // 額度含 thinking，見 2.5
-        // 注意：不要加 temperature——新模型會回 400，而且錯誤會被下面的 catch 吞掉
-        system: '你是高中英語老師。只輸出 JSON，不要 markdown 圍欄：{"sentence":"...","zh":"...","tip":"..."}',
-        messages: [{ role: "user",
-                     content: "用單字 " + word + " 造一個 CEFR B1 例句、中譯與聯想" }]
-      })
-    });
-    if (res.status === 401){                       // key 不對：清掉，下次自動重問
-      try { localStorage.removeItem("vb-key"); } catch(e){}
-      throw new Error("API key 不正確，已清除");
-    }
-    const data = await res.json();
-    const text = data.content.filter(b => b.type === "text")   // 依 type 挑，理由見 2.5
-                             .map(b => b.text).join("");
+    const text = await callClaude(
+      '你是高中英語老師。只輸出 JSON，不要 markdown 圍欄：{"sentence":"...","zh":"...","tip":"..."}',
+      "用單字 " + word + " 造一個 CEFR B1 例句、中譯與聯想");
     const c = JSON.parse(text);
     if (!c.sentence.toLowerCase().includes(word.toLowerCase()))
       throw new Error("例句沒包含目標單字");
@@ -162,6 +167,10 @@ async function aiExample(){
     try { localStorage.setItem("vb-ai", JSON.stringify(cache)); } catch(e){}
     show(c);
   } catch (e) {
+    if (e.code === "NO_KEY"){
+      if (!stale()) box.textContent = "需要 API key 才能生成例句。";
+      return;
+    }
     console.error("AI 例句失敗：", e);             // 讓錯誤現形：F12 → Console 看得到
     if (!stale()) box.textContent = "AI 暫時不可用——不影響複習，例句之後再補。";
   }
@@ -172,6 +181,66 @@ async function aiExample(){
     em.textContent = c.sentence;
     box.append(em, document.createElement("br"),
                c.zh, document.createElement("br"), "聯想：" + c.tip);
+  }
+}
+
+// ===== Sprint 4：智慧出題（RAG-lite：用你的學習紀錄增強出題）=====
+// 檢索：依錯誤率排序，取最弱的前 k 個字
+function weakest(k){
+  return WORDS
+    .map(w => { const s = log[w.en] || {seen:0, wrong:0};
+                return { en: w.en, zh: w.zh, rate: s.wrong / (s.seen || 1) }; })
+    .sort((a, b) => b.rate - a.rate)
+    .slice(0, k);
+}
+
+let quizSeq = 0;   // 連按「考我弱點」時，只畫最後一次的結果
+async function smartQuiz(){
+  const t = weakest(3);
+  const box = $("quiz");
+  const mySeq = ++quizSeq;
+  box.textContent = "出題中…";
+  try {
+    const text = await callClaude(
+      '你是出題老師。只輸出 JSON，不要 markdown 圍欄：{"question":"...","options":["..","..","..",".."],' +
+      '"answer":"..","why":".."}。question 是含 ____ 的英文克漏字句。',
+      "使用者最常錯的單字：" + t.map(w => w.en + "（" + w.zh + "）").join("、") +
+      "。從中挑一個出一題四選一，選項要包含正確答案與三個貼近的干擾項。");
+    const q = JSON.parse(text);
+    // 把模型回的答案對回單字包裡的本尊：大小寫不同、或根本不是你的單字，都不出題
+    const hit = t.find(w => w.en.toLowerCase() === String(q.answer || "").toLowerCase());
+    if (!Array.isArray(q.options) || q.options.length !== 4 ||
+        !q.options.includes(q.answer) || !hit) throw new Error("題目格式不合格");
+    if (mySeq !== quizSeq) return;
+    box.textContent = "";                                 // 模型輸出當文字，不當 HTML
+    const p = document.createElement("p");
+    p.textContent = q.question;
+    box.appendChild(p);
+    const btns = [];
+    let answered = false;
+    q.options.forEach(op => {
+      const b = document.createElement("button");
+      b.textContent = op;
+      b.onclick = () => {
+        if (answered) return;                             // 一題只計一次，不能連點洗紀錄
+        answered = true;
+        btns.forEach(x => x.disabled = true);
+        const ok = op === q.answer;
+        const s = stateOf(hit);                           // 鍵用本尊（hit.en），不用模型字串
+        s.seen++; if (!ok) s.wrong++;                     // 答題結果寫回紀錄：閉環
+        save();
+        const r = document.createElement("p");
+        r.textContent = ok ? "答對！" + q.why : "正解：" + q.answer + "。" + q.why;
+        box.appendChild(r);
+      };
+      btns.push(b);
+      box.appendChild(b);
+    });
+  } catch (e) {
+    if (mySeq !== quizSeq) return;
+    if (e.code === "NO_KEY"){ box.textContent = "需要 API key 才能出題。"; return; }
+    console.error("智慧出題失敗：", e);
+    box.textContent = "AI 暫時不可用，先用單字卡複習吧。";
   }
 }
 
